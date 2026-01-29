@@ -1,0 +1,44 @@
+# Environment
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# GCP Credentials
+config/gcp_credentials.json
+*.key
+*.pem
+
+# Data files
+data/raw/
+data/processed/
+data/*.csv
+data/*.parquet
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models and Results
+models/*.pkl
+models/*.joblib
+models/results/
+
+# Reports
+reports/*.html
+reports/*.pdf
+
+# Logs
+logs/
+*.log
