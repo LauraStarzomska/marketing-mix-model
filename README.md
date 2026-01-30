@@ -26,13 +26,32 @@ This repository implements a **statistical marketing mix model** that estimates:
 
 ## Quick Start (5 minutes)
 
-### 1. Run EDA Report
+### Option 1: Run Full Orchestrated Pipeline (RECOMMENDED)
+```bash
+python pipeline_orchestrator.py
+```
+Runs all 4 steps automatically (import → train → evaluate → export):
+- Loads `config/pipeline_config.yaml`
+- Processes raw data (20 → 312 features)
+- Fits OLS model
+- Calculates elasticity, MROAS, contributions
+- Saves: `data/processed/` and `models/results/`
+- Outputs: Summary with R², RMSE, elasticity
+
+**With custom config:**
+```bash
+python pipeline_orchestrator.py --config config/pipeline_config.yaml
+```
+
+### Option 2: Run Individual Scripts (for testing/debugging)
+
+#### 1. Run EDA Report
 ```bash
 python eda_summary.py
 ```
 Outputs: Data quality, channel spend, revenue metrics, promotional analysis
 
-### 2. Run Full Analysis Pipeline
+#### 2. Run Full Analysis Pipeline
 ```bash
 python run_mmm_analysis.py
 ```
@@ -42,7 +61,13 @@ Outputs:
 - Promotional impact
 - Model performance (R², RMSE, MAE)
 
-### 3. Interactive Modeling (Jupyter)
+#### 3. Generate Detailed Report
+```bash
+python generate_report.py
+```
+Outputs: `reports/mmm_analysis_report.txt` (253-line detailed analysis)
+
+#### 4. Interactive Modeling (Jupyter)
 ```bash
 jupyter notebook notebooks/03_mmm_modeling.ipynb
 ```
