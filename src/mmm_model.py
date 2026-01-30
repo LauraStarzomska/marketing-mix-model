@@ -283,6 +283,81 @@ class MMModel:
 
         return pd.Series(contributions).sort_values(ascending=False)
 
+    def calculate_marginal_roas(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        spend_features: List[str],
+        raw_spend: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate Marginal Return on Ad Spend (MROAS) for each channel.
+
+        MROAS = β_k * (Total_Sales / Total_Spend_k)
+        
+        Interpretation: For every additional $1 spent on channel k at current spend levels,
+        we expect revenue to increase by MROAS_k dollars.
+
+        Args:
+            X: Feature matrix (should contain log-transformed spend)
+            y: Target variable (sales/revenue)
+            spend_features: List of spend feature names (e.g., ['log_spend_google'])
+            raw_spend: Optional DataFrame with raw (non-log) spend values for scale calculation
+
+        Returns:
+            DataFrame with MROAS for each channel
+        """
+        coefs = self.get_coefficients()
+        total_sales = y.sum()
+        
+        mroas_results = {}
+        
+        for spend_feat in spend_features:
+            if spend_feat not in coefs.index:
+                logger.warning(f"Feature {spend_feat} not in model coefficients")
+                continue
+            
+            # Get coefficient
+            beta_k = coefs[spend_feat]
+            
+            # Determine spend column name
+            # Try to find corresponding raw spend column
+            spend_col = None
+            if raw_spend is not None:
+                # Try exact match or remove '_log' suffix
+                if spend_feat in raw_spend.columns:
+                    spend_col = spend_feat
+                elif spend_feat.endswith('_log'):
+                    base_name = spend_feat.replace('_log', '')
+                    if base_name in raw_spend.columns:
+                        spend_col = base_name
+            
+            if spend_col and raw_spend is not None:
+                total_spend = raw_spend[spend_col].sum()
+            else:
+                logger.warning(f"Could not find raw spend for {spend_feat}, using mean approximation")
+                total_spend = np.exp(X[spend_feat].mean()) - 1 if spend_feat.endswith('_log') else X[spend_feat].mean()
+            
+            # Avoid division by zero
+            if total_spend > 0:
+                mroas = beta_k * (total_sales / total_spend)
+                mroas_results[spend_feat] = {
+                    'coefficient': beta_k,
+                    'total_sales': total_sales,
+                    'total_spend': total_spend,
+                    'mroas': mroas,
+                    'mroas_interpretation': f'${mroas:.2f} revenue per $1 spend'
+                }
+        
+        mroas_df = pd.DataFrame(mroas_results).T
+        mroas_df = mroas_df.sort_values('mroas', ascending=False)
+        
+        logger.info(f"\nMarginal ROAS by Channel:")
+        for idx, row in mroas_df.iterrows():
+            logger.info(f"  {idx}: {row['mroas_interpretation']}")
+        
+        return mroas_df
+
     def summary(self) -> str:
         """Get model summary"""
         if not self.is_fitted:

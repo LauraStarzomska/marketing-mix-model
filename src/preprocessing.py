@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,10 @@ class MarketingDataPreprocessor:
             'log_transform': True,
             'handle_promotions': True,
             'fillna_method': 'median',  # 'median', 'ffill', 'bfill'
+            'create_lags': True,  # Create lag variables for media spend
+            'lag_periods': [1, 2],  # Create lag 1 and lag 2
+            'create_fixed_effects': True,  # Create geo & week fixed effects
+            'create_seasonality': True,  # Create seasonal controls
         }
     
     def run(self):
@@ -56,6 +61,10 @@ class MarketingDataPreprocessor:
         self._create_channel_lists()
         self._engineer_features()
         self._handle_promotional_data()
+        self._create_lagged_features()
+        self._create_fixed_effects()
+        self._create_seasonality_features()
+        self._isolate_organic_control()
         
         logger.info("✓ Preprocessing complete")
         return self
@@ -138,19 +147,161 @@ class MarketingDataPreprocessor:
             self.preprocessing_log.append("Applied log transformations for elasticity")
     
     def _handle_promotional_data(self):
-        """Process promotional information"""
+        """Process promotional information and extract promo features"""
         logger.info("Processing promotional data...")
         
-        if 'promo_description' in self.df.columns:
-            # Create binary promotion indicator
-            self.df['has_promotion'] = (~self.df['promo_description'].isna()).astype(int)
+        if 'promo_description' not in self.df.columns:
+            logger.info("  ⚠ No promotional data found")
+            return
+        
+        # 1. Binary indicator: any promotion present
+        self.df['has_promotion'] = (~self.df['promo_description'].isna()).astype(int)
+        
+        # 2. Extract promotional feature types using regex patterns
+        promo_text = self.df['promo_description'].fillna('').str.lower()
+        
+        # Define promotional patterns
+        promo_patterns = {
+            'free_shipping_promo': [r'darmowa dostawa', r'bezpłatna wysyłka', r'free shipping', r'za darmo\s+wysy'],
+            'discount_percent_promo': [r'rabat', r'-\d+%', r'discount', r'taniej', r'tańsza'],
+            'free_item_promo': [r'gratis', r'bezpłatnie', r'free item', r'za darmo\s+produkt'],
+            'bundle_multibuy_promo': [r'druga sztuka', r'kupujesz.*drugi', r'2[+\w]*\s+za', r'bundle', r'komplet'],
+            'min_purchase_promo': [r'zamówień powyżej', r'minimum', r'od\s+\d+', r'powyżej\s+\d+', r'za\s+\d+\s+zł'],
+        }
+        
+        # Create binary features for each promo type
+        promo_feature_cols = []
+        for promo_type, patterns in promo_patterns.items():
+            pattern_str = '|'.join(patterns)
+            self.df[promo_type] = promo_text.str.contains(pattern_str, regex=True, case=False).astype(int)
+            promo_feature_cols.append(promo_type)
+            count = self.df[promo_type].sum()
+            if count > 0:
+                logger.info(f"  • {promo_type}: {count:,} records ({100*count/len(self.df):.1f}%)")
+        
+        # 3. Extract discount percentage if mentioned
+        self.df['discount_percent'] = 0
+        discount_pattern = r'-(\d+)%'
+        for idx, promo in self.df['promo_description'].items():
+            if pd.notna(promo):
+                match = re.search(discount_pattern, promo)
+                if match:
+                    self.df.loc[idx, 'discount_percent'] = int(match.group(1))
+        
+        if self.df['discount_percent'].max() > 0:
+            logger.info(f"  • discount_percent: {(self.df['discount_percent'] > 0).sum():,} records with extracted %")
+            promo_feature_cols.append('discount_percent')
+        
+        # 4. Promotion intensity: count active promos per week-geo
+        self.df['promo_intensity'] = self.df.groupby(['week', 'geo'])['promo_description'].transform(
+            lambda x: (~x.isna()).sum()
+        )
+        logger.info(f"  • promo_intensity: promotional count per week-geo")
+        promo_feature_cols.append('promo_intensity')
+        
+        # Store promotional feature columns
+        self.promo_feature_cols = promo_feature_cols
+        
+        logger.info(f"  • Created {len(promo_feature_cols)} promotional features")
+        self.preprocessing_log.append(f"Created {len(promo_feature_cols)} promotional features")
+        self.preprocessing_log.append(f"  - has_promotion (binary), free_shipping, discount_%, free_item, bundle, min_purchase")
+        self.preprocessing_log.append(f"  - discount_percent (extracted %), promo_intensity (count per week-geo)")
+    
+    def _create_lagged_features(self):
+        """Create lagged variables for media spend (capture carryover effects)"""
+        if not self.config['create_lags']:
+            return
+        
+        logger.info("Creating lagged media spend variables...")
+        lag_periods = self.config['lag_periods']
+        
+        # Ensure data is sorted by week for proper lags
+        if 'week' in self.df.columns:
+            self.df['week'] = pd.to_datetime(self.df['week'])
+            self.df = self.df.sort_values('week').reset_index(drop=True)
+        
+        lag_cols = []
+        for cost_col in self.cost_cols:
+            for lag in lag_periods:
+                lag_col = f'{cost_col}_lag{lag}'
+                # Group by geo to avoid spillover between geos
+                self.df[lag_col] = self.df.groupby('geo')[cost_col].shift(lag)
+                lag_cols.append(lag_col)
+        
+        logger.info(f"  • Created {len(lag_cols)} lagged spend variables (lag {lag_periods})")
+        self.preprocessing_log.append(f"Created lagged spend variables (lag {lag_periods})")
+        
+        # Fill missing lags with 0 (start of series)
+        for lag_col in lag_cols:
+            self.df[lag_col].fillna(0, inplace=True)
+    
+    def _create_fixed_effects(self):
+        """Create fixed effects dummies for geo and week"""
+        if not self.config['create_fixed_effects']:
+            return
+        
+        logger.info("Creating fixed effects...")
+        
+        # Geo fixed effects (one-hot encode, drop first for multicollinearity)
+        if 'geo' in self.df.columns:
+            geo_dummies = pd.get_dummies(self.df['geo'], prefix='geo_fe', drop_first=True)
+            n_geo = geo_dummies.shape[1]
+            self.df = pd.concat([self.df, geo_dummies], axis=1)
+            logger.info(f"  • Created {n_geo} geo fixed effects dummies")
+            self.preprocessing_log.append(f"Created {n_geo} geo fixed effects")
+        
+        # Week fixed effects (one-hot encode, drop first)
+        if 'week' in self.df.columns:
+            week_dummies = pd.get_dummies(self.df['week'], prefix='week_fe', drop_first=True)
+            n_week = week_dummies.shape[1]
+            self.df = pd.concat([self.df, week_dummies], axis=1)
+            logger.info(f"  • Created {n_week} week fixed effects dummies")
+            self.preprocessing_log.append(f"Created {n_week} week fixed effects")
+    
+    def _create_seasonality_features(self):
+        """Create seasonal control variables (month, quarter, day of week)"""
+        if not self.config['create_seasonality']:
+            return
+        
+        logger.info("Creating seasonality features...")
+        
+        if 'week' not in self.df.columns:
+            return
+        
+        # Ensure week is datetime
+        if not pd.api.types.is_datetime64_any_dtype(self.df['week']):
+            self.df['week'] = pd.to_datetime(self.df['week'])
+        
+        # Month of year (12 months, drop first)
+        month_dummies = pd.get_dummies(self.df['week'].dt.month, prefix='month', drop_first=True)
+        self.df = pd.concat([self.df, month_dummies], axis=1)
+        
+        # Quarter (4 quarters, drop first)
+        quarter_dummies = pd.get_dummies(self.df['week'].dt.quarter, prefix='quarter', drop_first=True)
+        self.df = pd.concat([self.df, quarter_dummies], axis=1)
+        
+        # Week of year (52 weeks, drop first to avoid collinearity with month)
+        week_of_year_dummies = pd.get_dummies(self.df['week'].dt.isocalendar().week, prefix='week_of_year', drop_first=True)
+        self.df = pd.concat([self.df, week_of_year_dummies], axis=1)
+        
+        logger.info(f"  • Created month, quarter, and week-of-year seasonality controls")
+        self.preprocessing_log.append("Created seasonality features (month, quarter, week_of_year)")
+    
+    def _isolate_organic_control(self):
+        """Isolate organic traffic as dedicated control variable"""
+        logger.info("Processing organic traffic control...")
+        
+        if 'impression_organic' in self.df.columns:
+            # Create log-transformed organic traffic
+            self.df['log_organic'] = np.log(self.df['impression_organic'] + 1)
+            logger.info(f"  • Created log_organic control variable")
+            self.preprocessing_log.append("Created log_organic as control variable")
             
-            # Count of unique promotions per week-geo
-            promo_counts = self.df.groupby(['week', 'geo'])['promo_description'].nunique()
-            
-            logger.info(f"  • Created promotion indicator (has_promotion)")
-            logger.info(f"  • {self.df['has_promotion'].sum()} records with promotions")
-            self.preprocessing_log.append("Created promotional indicator variable")
+            # Optional: create lagged organic for promo halo effects
+            if self.config['create_lags'] and 'geo' in self.df.columns:
+                self.df['log_organic_lag1'] = self.df.groupby('geo')['log_organic'].shift(1).fillna(0)
+                logger.info(f"  • Created log_organic_lag1 for halo effects")
+                self.preprocessing_log.append("Created lagged organic traffic (halo effects)")
     
     def get_preprocessed_data(self):
         """Return preprocessed dataframe"""
@@ -160,13 +311,33 @@ class MarketingDataPreprocessor:
         """Return organized feature sets for modeling"""
         numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns.tolist()
         
+        # Promotional features created during preprocessing
+        promo_features = getattr(self, 'promo_feature_cols', ['has_promotion'])
+        
+        # Lagged features
+        lagged_features = [c for c in self.df.columns if '_lag' in c]
+        
+        # Fixed effects
+        geo_fe = [c for c in self.df.columns if c.startswith('geo_fe')]
+        week_fe = [c for c in self.df.columns if c.startswith('week_fe')]
+        
+        # Seasonal features
+        seasonal_features = [c for c in self.df.columns if any(x in c for x in ['month_', 'quarter_', 'week_of_year_'])]
+        
+        # Organic control
+        organic_features = [c for c in self.df.columns if 'organic' in c and c.startswith('log_')]
+        
         return {
             'target': ['revenue'],
             'spend_features': self.cost_cols,
+            'spend_features_log': [f'{c}_log' for c in self.cost_cols if f'{c}_log' in self.df.columns],
+            'lagged_spend_features': lagged_features,
             'impression_features': self.impression_cols,
-            'control_vars': ['population', 'market_share'],
-            'interaction_features': [c for c in self.df.columns if '_log' in c],
-            'promotional_features': ['has_promotion'],
+            'control_vars': ['population', 'market_share'] + organic_features,
+            'promotional_features': promo_features,
+            'geo_fixed_effects': geo_fe,
+            'week_fixed_effects': week_fe,
+            'seasonal_features': seasonal_features,
             'all_features': [c for c in numeric_cols if c not in ['revenue'] and 'promo_description' not in c]
         }
     
