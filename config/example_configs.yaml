@@ -1,0 +1,86 @@
+############################################
+# Example Pipeline Configurations
+# 
+# Copy and modify these as needed
+############################################
+
+# --- Example 1: Local data with OLS model ---
+# Run with: python pipeline_orchestrator.py --config config/example_local_ols.yaml
+
+data:
+  source: 'local'
+  path: 'data/raw/marketing_data.csv'
+
+model:
+  type: 'ols'
+  alpha: 0.0
+
+output:
+  dir: 'models/results/'
+  save_results: true
+
+steps:
+  data_import:
+    enabled: true
+  model_training:
+    enabled: true
+  model_evaluation:
+    enabled: true
+  data_export:
+    enabled: true
+
+---
+
+# --- Example 2: GCP with Lasso model ---
+# Run with: python pipeline_orchestrator.py --config config/example_gcp_lasso.yaml
+
+data:
+  source: 'gcp'
+  gcp_project: 'alterdata-rekrutacja-20'
+  gcp_dataset: 'marketing_data'
+
+model:
+  type: 'lasso'
+  alpha: 0.1
+
+output:
+  dir: 'models/results/'
+  save_results: true
+
+steps:
+  data_import:
+    enabled: true
+  model_training:
+    enabled: true
+  model_evaluation:
+    enabled: true
+  data_export:
+    enabled: true
+
+---
+
+# --- Example 3: Skip export (just train model) ---
+# Run with: python pipeline_orchestrator.py --config config/example_no_export.yaml
+
+data:
+  source: 'gcp'
+  gcp_project: 'alterdata-rekrutacja-20'
+  gcp_dataset: 'marketing_data'
+
+model:
+  type: 'ridge'
+  alpha: 1.0
+
+output:
+  dir: 'models/results/'
+  save_results: false
+
+steps:
+  data_import:
+    enabled: true
+  model_training:
+    enabled: true
+  model_evaluation:
+    enabled: true
+  data_export:
+    enabled: false

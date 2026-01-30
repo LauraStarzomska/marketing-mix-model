@@ -1,0 +1,161 @@
+"""
+GCP Cloud Workflow Definition for MMM Pipeline
+
+This workflow orchestrates the MMM pipeline on Google Cloud Platform using:
+- Cloud Workflow to define the execution logic
+- Cloud Run to execute each step as a containerized service
+- Cloud Storage to exchange data between steps
+- Cloud Scheduler to trigger on a schedule
+
+Deploy with:
+  gcloud workflows deploy mmm-pipeline --source=gcp_cloud_workflow.yaml
+
+Trigger manually with:
+  gcloud workflows run mmm-pipeline
+
+View execution with:
+  gcloud workflows describe mmm-pipeline
+  gcloud workflows executions describe <EXECUTION_ID>
+"""
+
+main:
+  steps:
+    - initialize:
+        assign:
+          - project_id: $${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - pipeline_config: "config/pipeline_config.yaml"
+          - timestamp: $${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+        next: log_start
+    
+    - log_start:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "INFO"
+                textPayload: ${"[MMM Pipeline] Workflow started - Execution ID: " + timestamp}
+        next: check_config
+    
+    - check_config:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: $${project_id + "-mmm-pipeline"}
+          object: $${pipeline_config}
+        result: config_file
+        next: step_1_data_import
+    
+    - step_1_data_import:
+        call: run.googleapis.com.v1.namespaces.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/us-central1/jobs/mmm-data-import"}
+          overrides:
+            environmentVariables:
+              PIPELINE_CONFIG: $${pipeline_config}
+              EXECUTION_ID: $${timestamp}
+        result: import_result
+        next: check_import_success
+    
+    - check_import_success:
+        switch:
+          - condition: $${import_result.status.completed and import_result.status.conditions[0].state == "ACTIVE"}
+            next: step_2_model_training
+        next: handle_import_failure
+    
+    - step_2_model_training:
+        call: run.googleapis.com.v1.namespaces.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/us-central1/jobs/mmm-model-training"}
+          overrides:
+            environmentVariables:
+              PIPELINE_CONFIG: $${pipeline_config}
+              EXECUTION_ID: $${timestamp}
+        result: training_result
+        next: check_training_success
+    
+    - check_training_success:
+        switch:
+          - condition: $${training_result.status.completed and training_result.status.conditions[0].state == "ACTIVE"}
+            next: step_3_model_evaluation
+        next: handle_training_failure
+    
+    - step_3_model_evaluation:
+        call: run.googleapis.com.v1.namespaces.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/us-central1/jobs/mmm-model-evaluation"}
+          overrides:
+            environmentVariables:
+              PIPELINE_CONFIG: $${pipeline_config}
+              EXECUTION_ID: $${timestamp}
+        result: evaluation_result
+        next: check_evaluation_success
+    
+    - check_evaluation_success:
+        switch:
+          - condition: $${evaluation_result.status.completed and evaluation_result.status.conditions[0].state == "ACTIVE"}
+            next: step_4_data_export
+        next: handle_evaluation_failure
+    
+    - step_4_data_export:
+        call: run.googleapis.com.v1.namespaces.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/us-central1/jobs/mmm-data-export"}
+          overrides:
+            environmentVariables:
+              PIPELINE_CONFIG: $${pipeline_config}
+              EXECUTION_ID: $${timestamp}
+        result: export_result
+        next: check_export_success
+    
+    - check_export_success:
+        switch:
+          - condition: $${export_result.status.completed and export_result.status.conditions[0].state == "ACTIVE"}
+            next: success
+        next: handle_export_failure
+    
+    - success:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "INFO"
+                textPayload: "[MMM Pipeline] Workflow completed successfully"
+        next: end
+    
+    - handle_import_failure:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "ERROR"
+                textPayload: "[MMM Pipeline] Data import step failed"
+        next: end
+    
+    - handle_training_failure:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "ERROR"
+                textPayload: "[MMM Pipeline] Model training step failed"
+        next: end
+    
+    - handle_evaluation_failure:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "ERROR"
+                textPayload: "[MMM Pipeline] Model evaluation step failed"
+        next: end
+    
+    - handle_export_failure:
+        call: googleapis.logging.v2.entries.write
+        args:
+          body:
+            entries:
+              - severity: "ERROR"
+                textPayload: "[MMM Pipeline] Data export step failed"
+        next: end
+    
+    - end:
+        return: ${"Pipeline execution completed with status: " + import_result.status.conditions[0].state}

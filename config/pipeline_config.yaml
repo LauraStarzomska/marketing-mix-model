@@ -1,0 +1,58 @@
+############################################
+# MMM Pipeline Configuration
+# 
+# Controls pipeline execution:
+# - Which steps to run
+# - Data sources and parameters
+# - Model configuration
+# - Output settings
+############################################
+
+# Global data configuration
+data:
+  source: 'gcp'  # 'gcp' or 'local'
+  path: 'data/raw/marketing_data.csv'  # For local source
+  gcp_project: 'alterdata-rekrutacja-20'
+  gcp_dataset: 'marketing_data'
+
+# Model configuration
+model:
+  type: 'ridge'  # 'ols', 'ridge', or 'lasso'
+  alpha: 1.0  # Regularization parameter (for ridge/lasso)
+
+# Output configuration
+output:
+  save_results: true
+  # Local filesystem settings
+  local:
+    enabled: true
+    dir: 'models/results/'
+  # Google Cloud Storage settings
+  gcs:
+    enabled: false  # Set to true to enable GCS export
+    project: 'alterdata-rekrutacja-20'  # Your GCP project ID
+    bucket: 'your-bucket-name'  # GCS bucket name (must exist)
+    path: 'mmm_pipeline_outputs/'  # Path prefix in bucket
+
+# Pipeline steps configuration
+steps:
+  
+  # Step 1: Data Import
+  data_import:
+    enabled: true
+    config: {}  # Inherits from global 'data' config
+  
+  # Step 2: Model Training (Preprocessing + Model Building)
+  model_training:
+    enabled: true
+    config: {}  # Inherits from global 'model' config
+  
+  # Step 3: Model Evaluation
+  model_evaluation:
+    enabled: true
+    config: {}
+  
+  # Step 4: Data Export
+  data_export:
+    enabled: true
+    config: {}  # Inherits from global 'output' config
